@@ -11,6 +11,10 @@
 #include <string.h>
 #include "hardware/flash.h"
 #include "pico/flash.h"
+#include "hardware/adc.h"
+#include "pico/sleep.h"
+#include "max30100_spo2.h"
+
 
 //TODO check red comments and other TODO's
 
@@ -25,7 +29,7 @@ extern uint32_t ADDR_PERSISTENT[];
 #define SERVER_PORT 4242
 
 #define BUF_SIZE 2048
-uint8_t blink = 0;
+uint8_t sent = 0;
 uint8_t data[2048] = {0}; //Wifi
 
 static struct tcp_pcb *client_pcb = NULL;
@@ -44,7 +48,10 @@ uint16_t samples = 0;
 float ecg[1280] = {0};
 bool ecg_done = false;
 
-
+//Battery
+float bat_val = 0;
+uint64_t last_bat_rd = 0;
+const uint64_t bat_rd_t 5 * 60e6;
 
 //Funciones wifi //TODO change this to use lib functions
 static err_t recv_callback(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t err) {
@@ -117,7 +124,16 @@ uint16_t ch0;
 uint64_t t = 0, last_t = 0, samp_t = 0;
 
 MAX30100_t max; //Sensor struct
-uint8_t SPO2 = 0;
+float spo2 = 0;
+bool max_done = false, max_saved = false;
+spo2_filter_t spo2f;
+uint16_t ir[500] = {0}, red[500] = {0};
+uint16_t max_samp = 0;
+uint64_t last_max_t = 0, last_spo2t = 0;
+// callback to update LED currents
+void set_led_current(uint8_t ir, uint8_t red) {
+    MAX30100_cfg(&sensor, 0x03, 0x03, 0x01, ir, red, true);
+}
 
 void Recibe_car(); 
 void setup();
@@ -142,7 +158,7 @@ int main()
         setup();
     }
 
-    //*Read configuration data from flash
+    //* Read configuration data from flash
     uint8_t loaded_conf[5] = {0};
 
     memcpy(loaded_conf, ADDR_PERSISTENT_BASE_ADDR, 5);
@@ -156,7 +172,13 @@ int main()
     panico = loaded_conf[0] & 1;
     electro = loaded_conf[1] << 8 | loaded_conf[2];
     spo = loaded_conf[3] << 8 | loaded_conf[4];
-    //*Read configuration data from flash
+    //* Read configuration data from flash
+
+    adc_init();
+    adc_gpio_init(26);
+    adc_select_input(0);
+    adc_hw->cs |= ADC_CS_START_ONCE_BITS;
+
 
     
     if (cyw43_arch_init()) {
@@ -166,10 +188,6 @@ int main()
 
     //*wifi trama mando
     //* !1-1-1-1-1-1-0000-0000-1? 
-    
-    //*wifi trama recibo
-    //* !ooooooo-bbbbbbb-p-c-eeeeeeee(x1280)?
-    //? oxigeno-bateria-panico-caida-electro
 
     // I2C Initialisation. Using it at 400Khz.
     i2c_init(I2C_PORT, 400*1000);
@@ -218,6 +236,7 @@ int main()
         MAX30100_Start_temp(&max); //Starts a temperature reading
 
         MAX30100_FIFO_CLR(&max); //!Clear the FIFO if this isn't done, the sensor doesn't work
+        spo2_filter_init(&spo2f, 0x03, 0x03);
     }
 
     if(electro_habi){
@@ -247,11 +266,21 @@ int main()
 
         t = timer0_hw->timehr<<32 | timer0_hw->timelr;
 
-        if(wifi_hab){
-            cyw43_arch_poll();
-            if (client_pcb && false) { //! this should be data ready flag or smth
-                send_to_server(data);
-            }
+        if(t > (last_bat_rd + bat_rd_t)){ 
+            adc_init();
+            adc_gpio_init(26);
+            adc_select_input(0);
+            adc_hw->cs |= ADC_CS_START_ONCE_BITS;
+
+            last_bat_rd = t;
+        }
+
+        if(adc_hw->cs & ADC_CS_READY_BIT){
+            bat_val = valor = ((adc_hw->result * 2)*3.3)/4096;
+        }
+
+        if(bat_val <= bat_min_lvl){
+            //TODO Shutdown
         }
 
         if(acel_habi){
@@ -270,27 +299,77 @@ int main()
             sleep_ms(200);
         }
 
+        //* take ecg
         if(electro_habi && (t/1e6)>((last_t/1e6)+electro)){
+            ecg_done = 0; //! Test this, idk if it'll work
             get_adc_sample();
-            if(ecg_done){
-                ecg_done = 0;
-                samples = 0;
-            }
+        }
+        if(ecg_done){
+            samples = 0;
+            memset(ecg, 0, sizeof(ecg));
         }
 
-        if(max_habi){
+        //* take spo2
+        if(max_habi && (t/1e6)>((last_spo2t/1e6)+spo)){
+            max_saved = false;
+            max_done = false;
+        }
+
+        if(max_habi){ //TODO make this take enough measurements to be able to calculate spo2
             if(MAX30100_read(&max)){
-                printf("%d %d  \n", max.ir, max.red);
+
                 if(MAX30100_read_temp(&max)){
                     MAX30100_Start_temp(&max);
                 }
                 MAX30100_FIFO_CLR(&max);
+
+                if(t > (last_max_t + 20e3)){
+                    red[max_samp++] = sensor.ir;
+                    ir[max_samp++] = sensor.red;
+                }
+
+                if(max_samp == 500 && !max_done){
+                    spo2 = spo2_process_batch(&spo2f, ir, red, 500);
+                    spo2_adjust_led_current(&spo2f, set_led_current);
+
+                    if (spo2f.spo2_valid) {
+                        printf("SpO2: %.2f%% | PI=%.4f | Quality=%.2f | IRcur=%u | REDcur=%u\n",
+                            spo2, spo2f.last_pi, spo2f.signal_quality,
+                            spo2f.ir_current, spo2f.red_current);
+                        max_done = true;
+                    } 
+                    else {
+                        printf("SpO2: -- (no finger or unstable signal)\n");
+                        max_samp = 0;
+                    }
+                }
+            }
+
+            if(datalog && max_done && !max_saved){
+                save_spo();
+                max_samp = 0;
+                max_saved = true;
+                last_spo2t = t;
             }
         }
 
-        //*activar y desactivar perifericos
-        //*intervalo de medicion
+        if(wifi_hab){
+            cyw43_arch_poll();
+            if ((client_pcb && max_done && ecg_done)||(client_pcb && panic_pressed)) { //! this should be data ready flag or smth
+                
+                //* wifi trama recibo
+                //* !ooooooo-bbbbbbb-p-c-eeeeeeee(x1280)?
+                //? oxigeno-bateria-panico-caida-electro
+                
 
+                send_to_server(data); //TODO make datagram
+                sent = 1;
+            }
+        }
+
+        if(sent){
+            //TODO sleep until next interval
+        }
     }
 }
 
@@ -315,7 +394,7 @@ void save_spo(){
         printf("ERROR: Could not open file (%d)\r\n", fr);
     }
 
-    ret = f_printf(&fil, "%d", SPO2);
+    ret = f_printf(&fil, "%d", (uint16_t)spo2);
     if (ret < 0) {
         printf("ERROR: Could not write to file (%d)\r\n", ret);
         f_close(&fil);

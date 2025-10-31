@@ -35,7 +35,7 @@ pico_sdk_init()
 
 # Add executable. Default name is the project name, version 0.1
 
-add_executable(Dispo_final Dispo_final.c hw_config.c lib/ads.c lib/MC3479.c lib/Max.c)
+add_executable(Dispo_final Dispo_final.c hw_config.c lib/ads.c lib/MC3479.c lib/Max.c lib/max30100_spo2.c)
 
 add_subdirectory(lib/no-OS-FatFS-SD-SPI-RPi-Pico/FatFs_SPI build)
 
@@ -55,6 +55,8 @@ target_link_libraries(Dispo_final
         hardware_i2c
         pico_cyw43_arch_lwip_threadsafe_background
         hardware_flash
+        hardware_adc
+        hardware_sleep
         )
 
 # Add the standard include files to the build
