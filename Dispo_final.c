@@ -40,16 +40,19 @@ void save_ecg();
 void save_spo();
 void exec_flash_range_erase(void* param);
 void exec_flash_range_program(void* param);
+void disp_init();
 //Intervals
 uint16_t electro=6000,spo=12000;
 uint16_t samples = 0;
 
 //ECG
 float ecg[1280] = {0};
-bool ecg_done = false;
+bool ecg_done = false, ecg_saved = false;
 
 //Battery
-float bat_val = 0;
+float bat_val = 0; 
+const float bat_min_lvl = 3.4;
+
 uint64_t last_bat_rd = 0;
 const uint64_t bat_rd_t 5 * 60e6;
 
@@ -67,7 +70,7 @@ static err_t recv_callback(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_
 
     memcpy(rec_data, (char *)p->payload, strlen((char *)p->payload));
 
-    if(rec_data[0] == '1')
+    if(rec_data[0] == '1') //TODO receive data?
         blink = 1;
     else if(rec_data[0] == '0')
         blink = 0;
@@ -88,14 +91,13 @@ static err_t connected_callback(void *arg, struct tcp_pcb *tpcb, err_t err) {
     return ERR_OK;
 }
 
-void send_to_server(const char *msg) {
+err_t send_to_server(const char *msg) {
     if (client_pcb) {
         tcp_write(client_pcb, msg, strlen(msg), TCP_WRITE_FLAG_COPY);
-        tcp_output(client_pcb);
-        printf("[You]: %s\n", msg);
+        return tcp_output(client_pcb);
     }
 }
-//Funciones wifi //TODO change this to use lib functions
+//Funciones wifi
 
 
 #define UART_ID uart0
@@ -120,6 +122,7 @@ char caracter_rec;
 struct ADS adsensor;
 const uint8_t addr = 0x1F;
 uint8_t electro_habi = 1, acel_habi = 0, max_habi = 1, cayo = 0, panico = 0, datalog = 1, wifi_hab = 0;
+bool mode_cont = false;
 uint16_t ch0;
 uint64_t t = 0, last_t = 0, samp_t = 0;
 
@@ -137,6 +140,11 @@ void set_led_current(uint8_t ir, uint8_t red) {
 
 void Recibe_car(); 
 void setup();
+static void sleep(uint32_t secs);
+
+static void sleep_callback(void) {
+    disp_init();
+}
 
 FRESULT fr;
 FATFS fs;
@@ -146,8 +154,11 @@ char buf[100];
 char filename_ecg[] = "ecg.csv";
 char filename_spo[] = "spo2.csv";
 
-int main()
-{
+//* Button
+uint8_t state = 0, last_state = 0, panic_pressed = 0;
+uint64_t pressed_time_i = 0, pressed_time = 0;
+
+int main(){
     stdio_init_all();
 
     gpio_init(button);
@@ -158,113 +169,27 @@ int main()
         setup();
     }
 
-    //* Read configuration data from flash
-    uint8_t loaded_conf[5] = {0};
-
-    memcpy(loaded_conf, ADDR_PERSISTENT_BASE_ADDR, 5);
-
-    uint8_t conf = acel_habi << 5 | electro_habi << 4 | max_habi << 3 | wifi_hab << 2 | datalog << 1 | panico;
-    acel_habi = (loaded_conf[0] >> 5) & 1;
-    electro_habi = (loaded_conf[0] >> 4) & 1;
-    max_habi = (loaded_conf[0] >> 3) & 1;
-    wifi_hab = (loaded_conf[0] >> 2) & 1;
-    datalog = (loaded_conf[0] >> 1) & 1;
-    panico = loaded_conf[0] & 1;
-    electro = loaded_conf[1] << 8 | loaded_conf[2];
-    spo = loaded_conf[3] << 8 | loaded_conf[4];
-    //* Read configuration data from flash
-
-    adc_init();
-    adc_gpio_init(26);
-    adc_select_input(0);
-    adc_hw->cs |= ADC_CS_START_ONCE_BITS;
-
-
-    
-    if (cyw43_arch_init()) {
-        printf("Wi-Fi init failed");
-        return -1;
-    }
-
-    //*wifi trama mando
-    //* !1-1-1-1-1-1-0000-0000-1? 
-
-    // I2C Initialisation. Using it at 400Khz.
-    i2c_init(I2C_PORT, 400*1000);
-    
-    gpio_set_function(I2C_SDA, GPIO_FUNC_I2C);
-    gpio_set_function(I2C_SCL, GPIO_FUNC_I2C);
-    gpio_pull_up(I2C_SDA);
-    gpio_pull_up(I2C_SCL);
-
-    if(datalog){
-        if (!sd_init_driver()) {
-            printf("ERROR: Could not initialize SD card\r\n");
-        }
-
-        // Mount drive
-        fr = f_mount(&fs, "0:", 1);
-        if (fr != FR_OK) {
-            printf("ERROR: Could not mount filesystem (%d)\r\n", fr);
-        }
-    }
-
-    if(wifi_hab){
-        cyw43_arch_enable_sta_mode();
-        printf("Connecting to WiFi...\n");
-        
-        while (cyw43_arch_wifi_connect_timeout_ms(WIFI_SSID, WIFI_PASS,
-                                            CYW43_AUTH_WPA2_AES_PSK, 30000)) {
-            printf("Failed to connect.\n");
-        }
-
-        ip_addr_t server_addr;
-        ip4addr_aton(SERVER_IP, &server_addr);
-
-        printf("Connecting to server %s:%d...\n", SERVER_IP, SERVER_PORT);
-        client_pcb = tcp_new();
-        tcp_connect(client_pcb, &server_addr, SERVER_PORT, connected_callback);
-    }
-    else{
-        cyw43_arch_deinit();
-    }
-
-    if(max_habi){
-        MAX30100_init(&max, i2c_default, 0x57); //Sensor init
-
-        MAX30100_cfg(&max, 0b11, 0, 0, 1, 1, false); //Sensor config, SPO2 mode, 200uS pulsewidth, 50Hz sample rate, 4.4mA for both leds, no high resolution
-        MAX30100_Start_temp(&max); //Starts a temperature reading
-
-        MAX30100_FIFO_CLR(&max); //!Clear the FIFO if this isn't done, the sensor doesn't work
-        spo2_filter_init(&spo2f, 0x03, 0x03);
-    }
-
-    if(electro_habi){
-        ads_init(&adsensor, i2c_default, addr);
-
-        // Configure the ADS to use channel 0 only
-        if (!ads_config_channel0(&adsensor)){
-            printf("Failed to configure ADS channel 0\n");
-        }
-
-        ads_config_ch0_single_ended(&adsensor);
-
-        // Optionally start the device data buffer/sequence if required by the sensor
-        if (!ads_start(&adsensor)){
-            printf("Warning: ads_start failed (device may not need explicit start)\n");
-        }
-    }
-
-    if(acel_habi){
-        start(false, 0x4C);
-    }
-        
-    stdio_init_all();
-
+    disp_init();
 
     while (true) {
 
         t = timer0_hw->timehr<<32 | timer0_hw->timelr;
+
+        state = gpio_get(button);
+        if(state != last_state){
+            last_state = state;
+            if(state){
+                pressed_time_i = t;
+            }
+            else{
+                pressed_time = t - pressed_time_i;
+                
+                if(pressed_time >= 5e6)
+                    panic_pressed = 1;
+                else
+                    panic_pressed = 0;
+            }
+        }
 
         if(t > (last_bat_rd + bat_rd_t)){ 
             adc_init();
@@ -276,7 +201,7 @@ int main()
         }
 
         if(adc_hw->cs & ADC_CS_READY_BIT){
-            bat_val = valor = ((adc_hw->result * 2)*3.3)/4096;
+            bat_val = ((adc_hw->result * 2)*3.3)/4096;
         }
 
         if(bat_val <= bat_min_lvl){
@@ -295,8 +220,6 @@ int main()
                 cayo= 1;
                 printf("se cayo");
             }
-
-            sleep_ms(200);
         }
 
         //* take ecg
@@ -315,7 +238,7 @@ int main()
             max_done = false;
         }
 
-        if(max_habi){ //TODO make this take enough measurements to be able to calculate spo2
+        if(max_habi){
             if(MAX30100_read(&max)){
 
                 if(MAX30100_read_temp(&max)){
@@ -360,15 +283,35 @@ int main()
                 //* wifi trama recibo
                 //* !ooooooo-bbbbbbb-p-c-eeeeeeee(x1280)?
                 //? oxigeno-bateria-panico-caida-electro
-                
 
-                send_to_server(data); //TODO make datagram
-                sent = 1;
+                
+                data[0] = (unit8_t)spo2;
+                data[1] = (uint8_t)(((bat_val - bat_min_lvl) * 100)/(bat_val-bat_min_lvl)); //! Test this
+                data[2] = panic_pressed;
+                data[3] = cayo;
+
+                uint8_t split_data[2*1280] = {0};
+
+                for(int i = 0; i < 1280; i++){ //! Test this
+                    // Extract the high 8 bits
+                    split_data[i * 2] = (uint8_t)(ecg[i] >> 8); 
+                    // Extract the low 8 bits
+                    split_data[i * 2 + 1] = (uint8_t)(ecg[i] & 0xFF);
+                }
+
+                memcpy(data+4, split_data, strlen(split_data));
+
+                if(send_to_server(data) == ERR_OK)
+                    sent = 1;
             }
         }
 
-        if(sent){
-            //TODO sleep until next interval
+        if(((wifi_hab && sent) || (datalog && ecg_saved && max_saved) || (!wifi_hab && !datalog)) && !mode_cont){
+            ads_stop(adsensor);
+            MAX30100_cfg(&max, 0x80, 0, 0, 0, 0, 0);
+            stop();
+            sleep((electro > spo) ? electro : spo);
+            sleep_power_up();
         }
     }
 }
@@ -417,6 +360,8 @@ void save_ecg(){
         f_close(&fil);
     }
 
+    ecg_saved = true;
+    
     // Close file
     fr = f_close(&fil);
 }
@@ -577,4 +522,124 @@ void exec_flash_range_program(void* param){
     uint8_t *data = (uint8_t *)((uintptr_t*)param)[1];
 
     flash_range_program(addr, data, FLASH_PAGE_SIZE);
+}
+
+static void sleep(uint32_t secs){
+    sleep_run_from_lposc();
+    struct timespec ts;
+    aon_timer_get_time(&ts);
+    ts.tv_sec += secs;
+    sleep_goto_dormant_until(&ts, &sleep_callback);
+}
+
+void disp_init(){
+    
+    gpio_init(button);
+    gpio_set_dir(button, 0);
+
+    //* Read configuration data from flash
+    uint8_t loaded_conf[5] = {0};
+
+    memcpy(loaded_conf, ADDR_PERSISTENT_BASE_ADDR, 5);
+
+    uint8_t conf = acel_habi << 5 | electro_habi << 4 | max_habi << 3 | wifi_hab << 2 | datalog << 1 | panico;
+    acel_habi = (loaded_conf[0] >> 5) & 1;
+    electro_habi = (loaded_conf[0] >> 4) & 1;
+    max_habi = (loaded_conf[0] >> 3) & 1;
+    wifi_hab = (loaded_conf[0] >> 2) & 1;
+    datalog = (loaded_conf[0] >> 1) & 1;
+    panico = loaded_conf[0] & 1;
+    electro = loaded_conf[1] << 8 | loaded_conf[2];
+    spo = loaded_conf[3] << 8 | loaded_conf[4];
+    //* Read configuration data from flash
+
+    if(electro >= 10 || spo >= 10)
+        mode_cont = true;
+
+    adc_init();
+    adc_gpio_init(26);
+    adc_select_input(0);
+    adc_hw->cs |= ADC_CS_START_ONCE_BITS;
+
+
+    
+    if (cyw43_arch_init()) {
+        printf("Wi-Fi init failed");
+        return -1;
+    }
+
+    //*wifi trama mando
+    //* !1-1-1-1-1-1-0000-0000-1? 
+
+    // I2C Initialisation. Using it at 400Khz.
+    i2c_init(I2C_PORT, 400*1000);
+    
+    gpio_set_function(I2C_SDA, GPIO_FUNC_I2C);
+    gpio_set_function(I2C_SCL, GPIO_FUNC_I2C);
+    gpio_pull_up(I2C_SDA);
+    gpio_pull_up(I2C_SCL);
+
+    if(datalog){
+        if (!sd_init_driver()) {
+            printf("ERROR: Could not initialize SD card\r\n");
+        }
+
+        // Mount drive
+        fr = f_mount(&fs, "0:", 1);
+        if (fr != FR_OK) {
+            printf("ERROR: Could not mount filesystem (%d)\r\n", fr);
+        }
+    }
+
+    if(wifi_hab){
+        cyw43_arch_enable_sta_mode();
+        printf("Connecting to WiFi...\n");
+        
+        while (cyw43_arch_wifi_connect_timeout_ms(WIFI_SSID, WIFI_PASS,
+                                            CYW43_AUTH_WPA2_AES_PSK, 30000)) {
+            printf("Failed to connect.\n");
+        }
+
+        ip_addr_t server_addr;
+        ip4addr_aton(SERVER_IP, &server_addr);
+
+        printf("Connecting to server %s:%d...\n", SERVER_IP, SERVER_PORT);
+        client_pcb = tcp_new();
+        tcp_connect(client_pcb, &server_addr, SERVER_PORT, connected_callback);
+    }
+    else{
+        cyw43_arch_deinit();
+    }
+
+    if(max_habi){
+        MAX30100_init(&max, i2c_default, 0x57); //Sensor init
+
+        MAX30100_cfg(&max, 0b11, 0, 0, 1, 1, false); //Sensor config, SPO2 mode, 200uS pulsewidth, 50Hz sample rate, 4.4mA for both leds, no high resolution
+        MAX30100_Start_temp(&max); //Starts a temperature reading
+
+        MAX30100_FIFO_CLR(&max); //!Clear the FIFO if this isn't done, the sensor doesn't work
+        spo2_filter_init(&spo2f, 0x03, 0x03);
+    }
+
+    if(electro_habi){
+        ads_init(&adsensor, i2c_default, addr);
+
+        // Configure the ADS to use channel 0 only
+        if (!ads_config_channel0(&adsensor)){
+            printf("Failed to configure ADS channel 0\n");
+        }
+
+        ads_config_ch0_single_ended(&adsensor);
+
+        // Optionally start the device data buffer/sequence if required by the sensor
+        if (!ads_start(&adsensor)){
+            printf("Warning: ads_start failed (device may not need explicit start)\n");
+        }
+    }
+
+    if(acel_habi){
+        start(false, 0x4C);
+    }
+        
+    stdio_init_all();
 }
