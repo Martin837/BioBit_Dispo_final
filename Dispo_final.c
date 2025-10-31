@@ -12,6 +12,8 @@
 #include "hardware/flash.h"
 #include "pico/flash.h"
 
+//TODO check red comments and other TODO's
+
 //Flash
 extern uint32_t ADDR_PERSISTENT[];
 #define ADDR_PERSISTENT_BASE_ADDR (ADDR_PERSISTENT)
@@ -400,7 +402,8 @@ void setup(){
         return;
     }
 
-    uintptr_t params[] = { ADDR_PERSISTENT_BASE_ADDR, (uintptr_t)conf_data};
+
+    uintptr_t params[] = { (uintptr_t)ADDR_PERSISTENT_BASE_ADDR, (uintptr_t)conf_data};
 
     rc = flash_safe_execute(exec_flash_range_program, params, 3000);
 
@@ -492,7 +495,7 @@ void exec_flash_range_erase(void* param){
 
 void exec_flash_range_program(void* param){
     uint32_t addr = ((uintptr_t*)param)[0];
-    uint8_t *data = (const uint8_t *)((uintptr_t*)param)[1];
+    uint8_t *data = (uint8_t *)((uintptr_t*)param)[1];
 
     flash_range_program(addr, data, FLASH_PAGE_SIZE);
 }
