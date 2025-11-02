@@ -59,10 +59,10 @@ bool ads_read_channel0(ADS_t *sensor, int16_t *out){
     // We'll read two bytes starting at ACC_CH0_MSB.
     uint8_t reg = ACC_CH0_MSB;
     uint8_t rx[2] = {0,0};
-    int written = i2c_write_blocking(sensor->inst, sensor->addr, &reg, 1, true);
-    if (written != 1) return false;
-    int read = i2c_read_blocking(sensor->inst, sensor->addr, rx, 2, false);
-    if (read != 2) return false;
+    int written = i2c_write_timeout_us(sensor->inst, sensor->addr, &reg, 1, true, 1000);
+    if (written == PICO_ERROR_TIMEOUT) return false;
+    int read = i2c_read_timeout_us(sensor->inst, sensor->addr, rx, 2, false, 1000);
+    if (read == PICO_ERROR_TIMEOUT) return false;
 
     uint16_t val = (uint16_t)((rx[0] << 8) | rx[1])>>4;
     *out = val;

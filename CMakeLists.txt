@@ -28,6 +28,10 @@ set(PICO_BOARD pico2_w CACHE STRING "Board type")
 # Pull in Raspberry Pi Pico SDK (must be before project)
 include(pico_sdk_import.cmake)
 
+# We also need PICO EXTRAS
+set(PICO_EXTRAS_PATH D:/pico-extras)	
+include(${PICO_EXTRAS_PATH}/external/pico_extras_import.cmake)
+
 project(Dispo_final C CXX ASM)
 
 # Initialise the Raspberry Pi Pico SDK
@@ -57,6 +61,7 @@ target_link_libraries(Dispo_final
         hardware_flash
         hardware_adc
         hardware_sleep
+        hardware_powman
         )
 
 # Add the standard include files to the build

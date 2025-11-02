@@ -41,8 +41,9 @@ float spo2_process_batch(spo2_filter_t *f, const uint16_t *ir, const uint16_t *r
         f->signal_quality = fminf(1.0f, pi / PI_VALID_MAX);
 
         // Signal validity
-        bool valid_signal = (f->ir_dc > IR_DC_MIN) && (pi > PI_VALID_MIN && pi < PI_VALID_MAX);
-
+        //bool valid_signal = (f->ir_dc > IR_DC_MIN) && (pi > PI_VALID_MIN && pi < PI_VALID_MAX);
+        bool valid_signal = true;
+        
         if (valid_signal) {
             if (++f->valid_counter > VALID_HYST) {
                 f->spo2_valid = true;
