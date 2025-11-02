@@ -136,7 +136,7 @@ const uint8_t addr = 0x1F;
 uint8_t electro_habi = 0, acel_habi = 0, max_habi = 0, cayo = 0, panico = 0, datalog = 0, wifi_hab = 0, first_run = 0;
 bool mode_cont = false;
 uint16_t ch0;
-uint64_t t = 10e6, last_t = 0, samp_t = 0;
+volatile uint64_t t = 10e6, last_t = 0, samp_t = 0;
 
 MAX30100_t max; //Sensor struct
 float spo2 = 0;
@@ -144,7 +144,7 @@ bool max_done = false, max_saved = false;
 spo2_filter_t spo2f;
 uint16_t ir[500] = {0}, red[500] = {0};
 uint16_t max_samp = 0;
-uint64_t last_max_t = 0, last_spo2t = 0;
+volatile uint64_t last_max_t = 0, last_spo2t = 0;
 // callback to update LED currents
 void set_led_current(uint8_t ir, uint8_t red) {
     MAX30100_cfg(&max, 0x03, 0x03, 0x01, ir, red, true);
@@ -269,6 +269,7 @@ int main(){
                 if(t > (last_max_t + 20e3)){
                     red[max_samp++] = max.ir;
                     ir[max_samp++] = max.red;
+                    last_max_t = t;
                 }
 
                 if(max_samp == 500 && !max_done){
@@ -489,8 +490,7 @@ void setup(){
     return;
 }
 
-void Recibe_car()
-{
+void Recibe_car(){
 
     if ((uart0_hw->ris & UART_UARTRIS_RXRIS_BITS) != 0) // Chequeo la interrupcion por RX
     {
