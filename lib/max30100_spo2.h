@@ -7,7 +7,7 @@
 #define SPO2_WINDOW_SIZE 500   // 10 seconds @ 50 Hz (adjust for your sample rate)
 
 // Tunable parameters
-#define IR_DC_MIN      10000.0f
+#define IR_DC_MIN      4000.0f
 #define PI_VALID_MIN   0.008f
 #define PI_VALID_MAX   0.08f
 #define VALID_HYST     5

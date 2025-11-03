@@ -2,11 +2,11 @@
 #include <math.h>
 #include <string.h>
 
-#define ALPHA_DC    0.96f
-#define ALPHA_AC    0.85f
+#define ALPHA_DC    0.9f
+#define ALPHA_AC    0.7f
 #define ALPHA_SPO2  0.8f
-#define SPO2_A      110.0f
-#define SPO2_B      25.0f
+#define SPO2_A      104.0f
+#define SPO2_B      17.0f
 
 static inline float lowpass(float in, float prev, float alpha) {
     return alpha * prev + (1.0f - alpha) * in;
@@ -17,6 +17,11 @@ void spo2_filter_init(spo2_filter_t *f, uint8_t ir_current_init, uint8_t red_cur
     f->spo2_valid = false;
     f->ir_current = ir_current_init;
     f->red_current = red_current_init;
+    // initialize DC terms to a small, non-zero value to avoid large transient PI
+    // or division-by-zero issues before the filter has converged
+    f->ir_dc = 1.0f;
+    f->red_dc = 1.0f;
+    f->spo2_filtered = 98.0f;  // reasonable starting value
 }
 
 float spo2_process_batch(spo2_filter_t *f, const uint16_t *ir, const uint16_t *red, int n) {
@@ -30,19 +35,22 @@ float spo2_process_batch(spo2_filter_t *f, const uint16_t *ir, const uint16_t *r
         f->ir_dc  = lowpass(irf,  f->ir_dc,  ALPHA_DC);
         f->red_dc = lowpass(redf, f->red_dc, ALPHA_DC);
 
-        // AC envelope
+        // AC component (RMS envelope)
         float ir_ac  = irf  - f->ir_dc;
         float red_ac = redf - f->red_dc;
-        f->ir_ac_avg  = lowpass(fabsf(ir_ac),  f->ir_ac_avg,  ALPHA_AC);
-        f->red_ac_avg = lowpass(fabsf(red_ac), f->red_ac_avg, ALPHA_AC);
 
-        // Perfusion index
-        float pi = f->ir_ac_avg / f->ir_dc;
-        f->signal_quality = fminf(1.0f, pi / PI_VALID_MAX);
+        // Compute RMS amplitude using exponential smoothing
+        f->ir_ac_avg  = sqrtf(lowpass(ir_ac * ir_ac,  f->ir_ac_avg * f->ir_ac_avg,  ALPHA_AC));
+        f->red_ac_avg = sqrtf(lowpass(red_ac * red_ac, f->red_ac_avg * f->red_ac_avg, ALPHA_AC));
+
+    // Perfusion index (protect against tiny DC values)
+    float ir_dc_d = fmaxf(f->ir_dc, 1e-3f);
+    float pi = f->ir_ac_avg / ir_dc_d;
+    f->signal_quality = fminf(1.0f, pi / PI_VALID_MAX);
 
         // Signal validity
-        //bool valid_signal = (f->ir_dc > IR_DC_MIN) && (pi > PI_VALID_MIN && pi < PI_VALID_MAX);
-        bool valid_signal = true;
+        bool valid_signal = (f->ir_dc > IR_DC_MIN) && (pi > PI_VALID_MIN && pi < PI_VALID_MAX);
+        //bool valid_signal = true;
         
         if (valid_signal) {
             if (++f->valid_counter > VALID_HYST) {
@@ -60,7 +68,13 @@ float spo2_process_batch(spo2_filter_t *f, const uint16_t *ir, const uint16_t *r
 
         // SpO2 computation
         if (f->spo2_valid) {
-            float ratio = (f->red_ac_avg / f->red_dc) / (f->ir_ac_avg / f->ir_dc);
+            // Compute ratio carefully to avoid division by tiny values
+            float red_dc_d = fmaxf(f->red_dc, 1e-3f);
+            float ir_dc_d2 = fmaxf(f->ir_dc, 1e-3f);
+            float ir_ac_d = fmaxf(f->ir_ac_avg, 1e-6f);
+            float red_ratio = f->red_ac_avg / red_dc_d;
+            float ir_ratio = f->ir_ac_avg / ir_dc_d2;
+            float ratio = (ir_ratio > 1e-6f) ? (red_ratio / ir_ratio) : 0.0f;
             spo2 = SPO2_A - SPO2_B * ratio;
             if (spo2 > 100.0f) spo2 = 100.0f;
             if (spo2 < 70.0f)  spo2 = 70.0f;

@@ -15,6 +15,45 @@ typedef struct MAX30100{ //! i2c addr, temp, ir, red, int,
     uint8_t interrupts;
 } MAX30100_t;
 
+enum SAMPLE_RATE {
+    SR50HZ = 0,
+    SR100HZ = 0b001,
+    SR167HZ = 0b010,
+    SR200HZ = 0b011,
+    SR400HZ = 0b100,
+    SR600HZ = 0b101,
+    SR800HZ = 0b110,
+    SR1KHZ = 0b111
+};
+
+enum LED_PULSEWIDTH{
+    PW200U = 0b00,
+    PW400U = 0b01,
+    PW800U = 0b10,
+    PW1600U = 0b11
+};
+
+enum LED_POWER {
+    I0M = 0b0000,
+    I4M4 = 0b0001,
+    I7M6 = 0b0010,
+    I11M = 0b0011,
+    I14M2 = 0b0100,
+    I17M4 = 0b0101,
+    I20M8 = 0b0110,
+    I24M = 0b0111,
+    I27M1 = 0b1000,
+    I30M6 = 0b1001,
+    I33M8 = 0b1010,
+    I37M = 0b1011,
+    I40M2 = 0b1100,
+    I43M6 = 0b1101,
+    I46M8 = 0b1110,
+    I50M = 0b1111
+};
+
+
+
 //@brief returns 0 if everyting went smooth, reads ir, red, and temperature data
 bool MAX30100_init(MAX30100_t *sens, i2c_inst_t *inst, uint8_t addr);
 

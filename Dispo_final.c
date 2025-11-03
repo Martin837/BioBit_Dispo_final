@@ -20,7 +20,7 @@
 #include "hardware/pll.h"
 #include "hardware/sync.h"
 
-#define debug 0
+#define debug 1
 static powman_power_state off_state;
 static powman_power_state on_state;
 
@@ -133,7 +133,7 @@ char caracter_rec;
 
 struct ADS adsensor;
 const uint8_t addr = 0x1F;
-uint8_t electro_habi = 0, acel_habi = 0, max_habi = 0, cayo = 0, panico = 0, datalog = 0, wifi_hab = 0, first_run = 0;
+uint8_t electro_habi = 0, acel_habi = 0, max_habi = 0, cayo = 0, panico = 0, datalog = 0, wifi_hab = 0, first_run = 1, first_run_max = 1;
 bool mode_cont = false;
 uint16_t ch0;
 volatile uint64_t t = 10e6, last_t = 0, samp_t = 0;
@@ -147,7 +147,7 @@ uint16_t max_samp = 0;
 volatile uint64_t last_max_t = 0, last_spo2t = 0;
 // callback to update LED currents
 void set_led_current(uint8_t ir, uint8_t red) {
-    MAX30100_cfg(&max, 0x03, 0x03, 0x01, ir, red, true);
+    MAX30100_cfg(&max, 0x03, PW200U, SR200HZ, ir, red, false);
 }
 
 void Recibe_car(); 
@@ -266,15 +266,17 @@ int main(){
 
                 MAX30100_FIFO_CLR(&max);
 
-                if(t > (last_max_t + 20e3)){
-                    red[max_samp++] = max.ir;
-                    ir[max_samp++] = max.red;
+                if((t > (last_max_t + 20e3) || (t < (last_max_t + 20e3) && first_run_max)) && !max_done){
+                    red[max_samp] = max.ir;
+                    ir[max_samp] = max.red;
                     last_max_t = t;
+                    first_run_max = 0;
+                    max_samp++;
                 }
 
                 if(max_samp == 500 && !max_done){
                     spo2 = spo2_process_batch(&spo2f, ir, red, 500);
-                    spo2_adjust_led_current(&spo2f, set_led_current);
+                    //spo2_adjust_led_current(&spo2f, set_led_current);
 
                     if (spo2f.spo2_valid) {
                         printf("SpO2: %.2f%% | PI=%.4f | Quality=%.2f | IRcur=%u | REDcur=%u\n",
@@ -682,11 +684,11 @@ int disp_init(){
     if(max_habi){
         MAX30100_init(&max, i2c_default, 0x57); //Sensor init
 
-        MAX30100_cfg(&max, 0b11, 0, 0, 1, 1, false); //Sensor config, SPO2 mode, 200uS pulsewidth, 50Hz sample rate, 4.4mA for both leds, no high resolution
+        MAX30100_cfg(&max, 0b11, PW200U, SR200HZ, I20M8, I4M4, false); //Sensor config, SPO2 mode, 200uS pulsewidth, 50Hz sample rate, 4.4mA for both leds, no high resolution
         MAX30100_Start_temp(&max); //Starts a temperature reading
 
         MAX30100_FIFO_CLR(&max); //!Clear the FIFO if this isn't done, the sensor doesn't work
-        spo2_filter_init(&spo2f, 0x03, 0x03);
+        spo2_filter_init(&spo2f, I14M2, I11M);
     }
 
     if(electro_habi){
