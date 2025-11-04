@@ -56,7 +56,7 @@ static int powman_sleep(uint32_t secs);
 void powman_init(uint64_t abs_time_ms);
 
 //Intervals
-uint16_t electro=0,spo=0;
+uint16_t electro=6000,spo=6000;
 uint16_t samples = 0;
 
 //ECG
@@ -133,7 +133,7 @@ char caracter_rec;
 
 struct ADS adsensor;
 const uint8_t addr = 0x1F;
-uint8_t electro_habi = 0, acel_habi = 0, max_habi = 0, cayo = 0, panico = 0, datalog = 0, wifi_hab = 0, first_run = 1, first_run_max = 1;
+uint8_t electro_habi = 1, acel_habi = 0, max_habi = 1, cayo = 0, panico = 0, datalog = 1, wifi_hab = 0, first_run = 1, first_run_max = 1;
 bool mode_cont = false;
 uint16_t ch0;
 volatile uint64_t t = 10e6, last_t = 0, samp_t = 0;
@@ -194,7 +194,7 @@ int main(){
 
     while (true) {
 
-        t = timer0_hw->timehr<<32 | timer0_hw->timelr;
+        t = ((uint64_t)(timer0_hw->timehr))<<32 | (uint64_t)timer0_hw->timelr;
 
         state = gpio_get(button);
         if(state != last_state){
@@ -396,7 +396,7 @@ void save_ecg(){
     uint16_t written = 0;
 
     for(int i = 0; i < 1280; i++){
-        ret = f_printf(&fil, "%d,\n", ecg[i]);
+        ret = f_printf(&fil, "%d,%d,\n", i, ecg[i]);
         if (ret < 0) {
             printf("ERROR: Could not write to file (%d), iteration %d\r\n", ret, i);
             f_close(&fil);
