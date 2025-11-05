@@ -24,6 +24,7 @@
 static powman_power_state off_state;
 static powman_power_state on_state;
 
+uint8_t hex_to_ascii[] = {'0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'A', 'B', 'C', 'D', 'E', 'F'};
 //TODO check red comments and other TODO's
 //TODO Test wifi, fall detection, and panic button
 
@@ -55,9 +56,14 @@ int disp_init();
 static int powman_sleep(uint32_t secs);
 void powman_init(uint64_t abs_time_ms);
 
+void encode(bool ekg, char* string);
+
 //Intervals
-uint16_t electro=6000,spo=6000;
+uint16_t electro=600,spo=600;
 uint16_t samples = 0;
+
+//!ID
+uint8_t id = 0b1000;
 
 //ECG
 uint16_t ecg[1280] = {0};
@@ -133,7 +139,7 @@ char caracter_rec;
 
 struct ADS adsensor;
 const uint8_t addr = 0x1F;
-uint8_t electro_habi = 1, acel_habi = 0, max_habi = 1, cayo = 0, panico = 0, datalog = 1, wifi_hab = 0, first_run = 1, first_run_max = 1;
+uint8_t electro_habi = 1, acel_habi = 0, max_habi = 1, cayo = 0, panico = 0, datalog = 0, wifi_hab = 1, first_run = 1, first_run_max = 1;
 bool mode_cont = false;
 uint16_t ch0;
 volatile uint64_t t = 10e6, last_t = 0, samp_t = 0;
@@ -306,22 +312,28 @@ int main(){
                 //* !ooooooo-bbbbbbb-p-c-eeeeeeee(x1280)?
                 //? oxigeno-bateria-panico-caida-electro
 
-                
-                data[0] = (uint8_t)spo2;
-                data[1] = (uint8_t)(((bat_val - bat_min_lvl) * 100)/(bat_val-bat_min_lvl)); //! Test this
-                data[2] = panic_pressed;
-                data[3] = cayo;
 
-                uint8_t split_data[2*1280] = {0};
+                data[0] = '!';
+                uint8_t spo_hex[4] = {0};
+                encode(false, spo_hex);
+                data[1] = spo_hex[0];
+                data[2] = spo_hex[1];
+                data[3] = '-';
+                uint8_t battery = (uint8_t)(((bat_val - bat_min_lvl) * 100)/(bat_val-bat_min_lvl));
+                data[4] = hex_to_ascii[battery>>4]; //! Test this
+                data[5] = hex_to_ascii[battery & 0xF];
+                data[6] = '-';
+                uint8_t panic_id = id | panic_pressed; 
+                data[7] = hex_to_ascii[panic_id];
+                data[8] = '-';
+                data[9] = hex_to_ascii[cayo];
+                data[10] = '-';
 
-                for(int i = 0; i < 1280; i++){ //! Test this
-                    // Extract the high 8 bits
-                    split_data[i * 2] = (uint8_t)(ecg[i] >> 8); 
-                    // Extract the low 8 bits
-                    split_data[i * 2 + 1] = (uint8_t)(ecg[i] & 0xFF);
-                }
+                uint8_t split_data[(4*1280)+1] = {0};
 
-                memcpy(data+4, split_data, strlen(split_data));
+                encode(true, split_data);
+
+                memcpy(data+10, split_data, strlen(split_data));
 
                 if(send_to_server(data) == ERR_OK)
                     sent = 1;
@@ -760,4 +772,23 @@ static int powman_sleep(uint32_t secs) {
 
     // Power down
     while (true) __wfi();
+}
+
+void encode(bool ekg, char* dest){
+    if(!ekg){
+        dest[0] = hex_to_ascii[(uint8_t)spo2>>4];
+        dest[1] = hex_to_ascii[(uint8_t)spo2 & 0xF];
+        dest[2] = '\n';
+    }
+    else{
+        for(int i = 0; i < 1280; i++){
+            dest[i] = hex_to_ascii[ecg[i] >> 12];
+            dest[i+1] = hex_to_ascii[(ecg[i] >> 8) & 0xF];
+            dest[i+2] = hex_to_ascii[(ecg[i] >> 4) & 0xF];
+            dest[i+3] = hex_to_ascii[ecg[i] & 0xF];
+        }
+
+        dest[1281] = '\n';
+
+    }
 }
