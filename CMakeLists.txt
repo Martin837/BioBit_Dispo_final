@@ -29,7 +29,7 @@ set(PICO_BOARD pico2_w CACHE STRING "Board type")
 include(pico_sdk_import.cmake)
 
 # We also need PICO EXTRAS
-set(PICO_EXTRAS_PATH C:/Users/araceli-thinkpad/Downloads/Proyecto\ final\ grupo\ 8\ CODIGOS/pico-extras)	
+set(PICO_EXTRAS_PATH D:/pico-extras)
 include(${PICO_EXTRAS_PATH}/external/pico_extras_import.cmake)
 
 project(Dispo_final C CXX ASM)

@@ -8,7 +8,7 @@
 #include "lib/MC3479.h"
 #include "lib/Max.h"
 #include "pico/cyw43_arch.h"
-#include "lwip/tcp.h"
+#include "lwip/udp.h"
 #include <string.h>
 #include "hardware/flash.h"
 #include "pico/flash.h"
@@ -33,17 +33,22 @@ extern uint32_t ADDR_PERSISTENT;
 #define ADDR_PERSISTENT_BASE_ADDR ((uint32_t)&ADDR_PERSISTENT - XIP_BASE)
 uintptr_t persistent_addr = (uintptr_t)&ADDR_PERSISTENT;
 
-//wifi
+//wifi - P2P configuration
 #define WIFI_SSID "Labyrinth" //TODO receive credentials over uart and save them to flash
 #define WIFI_PASS "alpha_november_tango_oscar"
-#define SERVER_IP "192.168.0.100"  // Replace with server's IP
-#define SERVER_PORT 4242
+#define PEER_IP "192.168.0.101"  // IP address of the other Pico
+#define PEER_PORT 5678           // UDP port on peer Pico
+#define LOCAL_PORT 5678          // Local UDP port to listen on
 
-#define BUF_SIZE 2048
-uint8_t sent = 0;
-uint8_t data[2048] = {0}; //Wifi
+#define BUF_SIZE 6000
+uint8_t sent = 0, avail = 1, sending = 0;
+char data[6000] = {0}; 
+int offset = 0;
+bool resend = false;
 
-static struct tcp_pcb *client_pcb = NULL;
+static struct udp_pcb *send_pcb = NULL;  // For sending to peer
+static struct udp_pcb *recv_pcb = NULL;  // For receiving from peer
+static ip_addr_t peer_addr;
 //wifi
 
 void get_adc_sample();
@@ -59,7 +64,7 @@ void powman_init(uint64_t abs_time_ms);
 void encode(bool ekg, char* string);
 
 //Intervals
-uint16_t electro=600,spo=600;
+uint16_t electro=10,spo=10;
 uint16_t samples = 0;
 
 //!ID
@@ -78,42 +83,54 @@ const uint64_t bat_rd_t = 5 * 60e6;
 uint8_t bat_read = 0;
 
 //Funciones wifi //TODO change this to use lib functions
-static err_t recv_callback(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t err) {
-    if (!p) {
-        printf("Disconnected from server.\n");
-        tcp_close(tpcb);
-        client_pcb = NULL;
-        return ERR_OK;
+uint16_t crc16_x25(const uint8_t *data, uint32_t len) {
+    uint16_t crc = 0xFFFF;
+    for (uint32_t i = 0; i < len; i++) {
+        crc ^= data[i];
+        for (int j = 0; j < 8; j++) {
+            if (crc & 1)
+                crc = (crc >> 1) ^ 0x8408;
+            else
+                crc >>= 1;
+        }
     }
-    printf("[Server]: %.*s\n", p->len, (char *)p->payload);
+    return ~crc;
+}
 
-    char rec_data[BUF_SIZE] = {0};
+static void recv_callback(void *arg, struct udp_pcb *pcb, struct pbuf *p, const ip_addr_t *addr, u16_t port) {
+    if (!p) return;
 
-    memcpy(rec_data, (char *)p->payload, strlen((char *)p->payload));
-
-    //TODO receive data?
-    
-    tcp_recved(tpcb, p->len);
+    uint8_t code = 0;
+    pbuf_copy_partial(p, &code, 1, 0);
     pbuf_free(p);
-    return ERR_OK;
+
+    if (code == 0xAA){
+        printf("ACK received\n");
+    }
+    else{
+        printf("NACK received\n");
+    }
 }
 
-static err_t connected_callback(void *arg, struct tcp_pcb *tpcb, err_t err) {
-    if (err != ERR_OK) {
-        printf("Connection failed: %d\n", err);
-        return err;
-    }
-    printf("Connected to server!\n");
-    client_pcb = tpcb;
-    tcp_recv(tpcb, recv_callback);
-    return ERR_OK;
+// UDP send callback - mark data as available for next send
+static void sent_callback(void *arg) {
+    printf("Data sent\n");
+    avail = 1;
 }
 
-err_t send_to_server(const char *msg) {
-    if (client_pcb) {
-        tcp_write(client_pcb, msg, strlen(msg), TCP_WRITE_FLAG_COPY);
-        return tcp_output(client_pcb);
+err_t send_to_peer(const char *msg, int len) {
+    if (send_pcb) {
+        avail = 0;
+        struct pbuf *p = pbuf_alloc(PBUF_TRANSPORT, len, PBUF_RAM);
+        if (p) {
+            pbuf_take(p, (const void *)msg, len);
+            err_t err = udp_sendto(send_pcb, p, &peer_addr, PEER_PORT);
+            pbuf_free(p);
+            return err;
+        }
+        return ERR_MEM;
     }
+    return ERR_CONN;
 }
 //Funciones wifi
 
@@ -258,7 +275,7 @@ int main(){
         }
         if(ecg_done){
             samples = 0;
-            memset(ecg, 0, sizeof(ecg));
+            //memset(ecg, 0, sizeof(ecg));
         }
 
         //* take spo2
@@ -302,45 +319,112 @@ int main(){
                 max_samp = 0;
                 last_spo2t = t;
             }
+            else if(!datalog && max_done)
+                last_spo2t = t;
         }
 
         if(wifi_hab){
             cyw43_arch_poll();
-            if ((client_pcb && max_done && ecg_done)||(client_pcb && panic_pressed)) { //! this should be data ready flag or smth
+            if ((send_pcb && max_done && ecg_done)||(send_pcb && panic_pressed)) { //! this should be data ready flag or smth
                 
                 //* wifi trama recibo
                 //* !ooooooo-bbbbbbb-p-c-eeeeeeee(x1280)?
                 //? oxigeno-bateria-panico-caida-electro
 
+                if(sending == 0 && !resend){
+                    data[0] = '!';
+                    uint8_t spo_hex[4] = {0};
+                    encode(false, spo_hex);
+                    data[1] = spo_hex[0];
+                    data[2] = spo_hex[1];
+                    data[3] = '-';
+                    uint8_t battery = (uint8_t)(((bat_val - bat_min_lvl) * 100)/(bat_val-bat_min_lvl));
+                    data[4] = hex_to_ascii[battery>>4]; //! Test this
+                    data[5] = hex_to_ascii[battery & 0xF];
+                    data[6] = '-';
+                    uint8_t panic_id = id | panic_pressed; 
+                    data[7] = hex_to_ascii[panic_id];
+                    data[8] = '-';
+                    data[9] = hex_to_ascii[cayo];
+                    data[10] = '-';
 
-                data[0] = '!';
-                uint8_t spo_hex[4] = {0};
-                encode(false, spo_hex);
-                data[1] = spo_hex[0];
-                data[2] = spo_hex[1];
-                data[3] = '-';
-                uint8_t battery = (uint8_t)(((bat_val - bat_min_lvl) * 100)/(bat_val-bat_min_lvl));
-                data[4] = hex_to_ascii[battery>>4]; //! Test this
-                data[5] = hex_to_ascii[battery & 0xF];
-                data[6] = '-';
-                uint8_t panic_id = id | panic_pressed; 
-                data[7] = hex_to_ascii[panic_id];
-                data[8] = '-';
-                data[9] = hex_to_ascii[cayo];
-                data[10] = '-';
+                    char split_data[(4*1280)+1] = {0};
 
-                uint8_t split_data[(4*1280)+1] = {0};
+                    encode(true, split_data);
 
-                encode(true, split_data);
+                    split_data[1281]=split_data[1280];
 
-                memcpy(data+10, split_data, strlen(split_data));
+                    strcat(data, split_data);
 
-                if(send_to_server(data) == ERR_OK)
-                    sent = 1;
+                    data[5131] = '?';
+                    data[5132] = '\0';
+
+                    offset = 0;
+                }
+
+                if(sending < 10) {
+                    int size = 512;
+                    char chunk[size];
+                    memcpy(chunk, &data[offset], size);
+                    
+                    cyw43_arch_poll();
+                    send_to_peer(chunk, 512);
+                    offset += size;
+                    sending++;
+                    printf("sent chunk %d: 1024 bytes\n", sending);
+                    sleep_ms(500);
+                }
+                else if(sending == 10) {
+                    // Send remaining data (last data chunk)
+                    int remaining = strlen(data) - offset;
+                    if (remaining > 0) {
+                        char chunk[remaining];
+                        memcpy(chunk, &data[offset], remaining);
+                        cyw43_arch_poll();
+                        send_to_peer(chunk, remaining);
+                        printf("sent chunk %d (final data): %d bytes\n", sending + 1, remaining);
+                    }
+                    sending++;
+                    sleep_ms(500);
+                }
+                else if(sending == 11) {
+                    // Send CRC
+                    uint16_t crc = crc16_x25((uint8_t*)data, strlen(data));
+                    uint8_t crc_bytes[2] = { crc & 0xFF, (crc >> 8) & 0xFF };
+
+                    struct pbuf *p = pbuf_alloc(PBUF_TRANSPORT, 2, PBUF_RAM);
+                    if (0) {
+                        pbuf_take(p, crc_bytes, 2);
+                        udp_sendto(send_pcb, p, &peer_addr, PEER_PORT);
+                        pbuf_free(p);
+                        printf("CRC %04X sent\n", crc);
+                    }
+                    sending++;
+                    sent = true;
+                }
+                //if(avail)
+                
             }
+            /*
+            if(sending == 1 && avail){
+                printf("Done sending");
+                sent = 1;
+                sending = 0;
+            }
+            */
         }
 
         if(((wifi_hab && sent) || (datalog && ecg_saved && max_saved) || (!wifi_hab && !datalog)) && !mode_cont && !state){
+            // Close UDP connections cleanly before shutting down Wi-Fi / sleeping
+            if (send_pcb) {
+                udp_remove(send_pcb);
+                send_pcb = NULL;
+            }
+            if (recv_pcb) {
+                udp_remove(recv_pcb);
+                recv_pcb = NULL;
+            }
+            cyw43_arch_deinit();
             ads_stop(&adsensor);
             MAX30100_cfg(&max, 0x80, 0, 0, 0, 0, 0);
             stop();
@@ -429,27 +513,12 @@ void save_ecg(){
 void setup(){
     cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 1);
     printf("Entered setup!");
-    
-    gpio_init(UART_TX_PIN);
-    gpio_set_dir(UART_TX_PIN, true);
-    gpio_put(UART_TX_PIN, 0);
 
-    gpio_init(UART_RX_PIN);
-    gpio_set_dir(UART_RX_PIN,false);
-    gpio_set_pulls(UART_RX_PIN,1,0);
-
-    #if !debug
-
-    bool uart = false, init = false;
+    bool init = false;
 
     while(config){
-        if(!gpio_get(UART_RX_PIN) && !uart){
-            //uart
-            gpio_put(UART_TX_PIN, 0);
-            uart = true;
-        }
 
-        if(uart && !init){
+        if(!init){
             // Set the TX and RX pins by using the function select on the GPIO
             // Set datasheet for more information on function select
             gpio_set_function(UART_TX_PIN, UART_FUNCSEL_NUM(UART_ID, UART_TX_PIN));
@@ -467,8 +536,8 @@ void setup(){
             irq_set_enabled(UART0_IRQ, true);
             init = true;
         }
+        tight_loop_contents();
     }
-    #endif
 
     //*Save config to flash
     uint8_t conf = acel_habi << 5 | electro_habi << 4 | max_habi << 3 | wifi_hab << 2 | datalog << 1 | panico;
@@ -482,6 +551,9 @@ void setup(){
     conf_data[2] = electro2;
     conf_data[3] = spo_1;
     conf_data[4] = spo_2;
+    conf_data[5] = id;
+
+    //TODO save wifi creds in flash
 
     int rc = flash_safe_execute(exec_flash_range_erase, (void *)ADDR_PERSISTENT_BASE_ADDR, 3000);
 
@@ -504,13 +576,9 @@ void setup(){
     return;
 }
 
-void Recibe_car(){
+char ssid[100] = {0}, pass[100] = {0}; //Write this to the flash
 
-    if ((uart0_hw->ris & UART_UARTRIS_RXRIS_BITS) != 0) // Chequeo la interrupcion por RX
-    {
-        caracter_rec = uart0_hw->dr;
-        uart0_hw->icr |= UART_UARTICR_RXIC_BITS; // Limpio la interrupcion de RX
-    }
+void Recibe_car(){
 
 
     if(caracter_rec =='!'){
@@ -522,6 +590,7 @@ void Recibe_car(){
     char trama[22]="!a-b-c-d-e-0000-0000";
 
     if(caracter_rec=='?'){
+        //{self.wifi_nombre}-{self.wifi_contra}?"
         // Acelerómetro
         if (recibo[1] == '1') {
             acel_habi = 1;
@@ -560,19 +629,36 @@ void Recibe_car(){
             datalog = 0;
         }
 
-        electro= ((recibo[11]-48)*1000)+((recibo[12]-48)*100)+((recibo[13]-48)*10)+(recibo[14]-48);
-        spo= ((recibo[16]-48)*1000)+((recibo[17]-48)*100)+((recibo[18]-48)*10)+(recibo[19]-48);
+        id = (recibo[11]-48);
+
+        electro= ((recibo[13]-48)*1000)+((recibo[14]-48)*100)+((recibo[15]-48)*10)+(recibo[16]-48);
+        spo= electro;
+
+        uint8_t ind = 18;
+
         
-        // PANICO
-        if (recibo[21] == '1') {
-            panico = 1;
-        } 
-        else if (recibo[21] == '0') {
-            panico = 0;
+        while(recibo[ind] != '-'){
+            ssid[ind-18] = recibo[ind];
+            ind++;
+        }
+        
+        ind++;
+
+        uint8_t off = ind;
+
+        while(recibo[ind] != '?'){
+            pass[ind-off] = recibo[ind];
+            ind++;
         }
 
         config = false;
 
+    }
+
+    if((uart0_hw->ris & UART_UARTRIS_RXRIS_BITS) != 0) // Chequeo la interrupcion por RX
+    {
+        caracter_rec = uart0_hw->dr;
+        uart0_hw->icr |= UART_UARTICR_RXIC_BITS; // Limpio la interrupcion de RX
     }
 }
 
@@ -619,7 +705,7 @@ int disp_init(){
 
     // safe read: volatile to prevent compiler optimizing away
     const volatile uint8_t *p = (const volatile uint8_t *)persistent_addr;
-    for (int i = 0; i < 5; ++i) {
+    for (int i = 0; i < 6; ++i) {
         loaded_conf[i] = p[i];
     }
     //!chat
@@ -638,6 +724,10 @@ int disp_init(){
     panico = loaded_conf[0] & 1;
     electro = loaded_conf[1] << 8 | loaded_conf[2];
     spo = loaded_conf[3] << 8 | loaded_conf[4];
+    id = loaded_conf[5];
+    
+    //TODO Retrieve wifi creds from flash
+
     //* Read configuration data from flash
     restore_interrupts(ints);
     #endif
@@ -682,12 +772,26 @@ int disp_init(){
             printf("Failed to connect.\n");
         }
 
-        ip_addr_t server_addr;
-        ip4addr_aton(SERVER_IP, &server_addr);
+        ip4addr_aton(PEER_IP, &peer_addr);
 
-        printf("Connecting to server %s:%d...\n", SERVER_IP, SERVER_PORT);
-        client_pcb = tcp_new();
-        tcp_connect(client_pcb, &server_addr, SERVER_PORT, connected_callback);
+        printf("P2P Setup: Listening on port %d, peer at %s:%d\n", LOCAL_PORT, PEER_IP, PEER_PORT);
+        
+        // Create UDP socket for sending to peer
+        send_pcb = udp_new();
+        if (!send_pcb) {
+            printf("Failed to create send PCB\n");
+        }
+        
+        // Create UDP socket for receiving from peer
+        recv_pcb = udp_new();
+        if (recv_pcb) {
+            if (udp_bind(recv_pcb, IP_ADDR_ANY, LOCAL_PORT) == ERR_OK) {
+                udp_recv(recv_pcb, recv_callback, NULL);
+                printf("Listening for peer data on port %d\n", LOCAL_PORT);
+            } else {
+                printf("Failed to bind receive socket\n");
+            }
+        }
     }
     else{
         cyw43_arch_deinit();
@@ -751,7 +855,7 @@ static int powman_sleep(uint32_t secs) {
 
     hw_set_bits(&powman_hw->vreg_ctrl, POWMAN_PASSWORD_BITS | POWMAN_VREG_CTRL_UNLOCK_BITS);
 
-    //powman_enable_gpio_wakeup(0, 2, false, true); //TODO Test if this works with the timer wakeup
+    powman_enable_gpio_wakeup(0, 2, false, true); //TODO Test if this works with the timer wakeup
     uint64_t ms = powman_timer_get_ms();
     powman_enable_alarm_wakeup_at_ms(ms+(secs*1000));
 
@@ -782,13 +886,10 @@ void encode(bool ekg, char* dest){
     }
     else{
         for(int i = 0; i < 1280; i++){
-            dest[i] = hex_to_ascii[ecg[i] >> 12];
-            dest[i+1] = hex_to_ascii[(ecg[i] >> 8) & 0xF];
-            dest[i+2] = hex_to_ascii[(ecg[i] >> 4) & 0xF];
-            dest[i+3] = hex_to_ascii[ecg[i] & 0xF];
+            sprintf(dest+i*4, "%04X", ecg[i]);
         }
 
-        dest[1281] = '\n';
+        dest[1281] = '\0';
 
     }
 }
